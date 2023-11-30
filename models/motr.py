@@ -640,6 +640,7 @@ class MOTR(nn.Module):
         '''初始化loss'''
         if self.training:
             self.criterion.initialize_for_single_clip(data['gt_instances'])
+        '''初始化input以及output'''
         frames = data['imgs']  # list of Tensor.
         outputs = {
             'pred_logits': [],
