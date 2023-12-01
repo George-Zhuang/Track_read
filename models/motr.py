@@ -96,6 +96,7 @@ class ClipMatcher(SetCriterion):
         return num_boxes
 
     def get_loss(self, loss, outputs, gt_instances, indices, num_boxes, **kwargs):
+        ''''''
         loss_map = {
             'labels': self.loss_labels,
             'cardinality': self.loss_cardinality,
@@ -189,7 +190,7 @@ class ClipMatcher(SetCriterion):
         obj_idxes = gt_instances_i.obj_ids
         obj_idxes_list = obj_idxes.detach().cpu().numpy().tolist()
         # gt_idx代表当前帧目标的id序号 而obj_idx代表annotation中总的目标id序号
-        # 一般obj_idx是一个较大的值 所以用gt_idx索引，似乎更加方便？
+        # 一般obj_idx是一个较大的值 所以用gt_idx索引, 似乎更加方便？
         obj_idx_to_gt_idx = {obj_idx: gt_idx for gt_idx, obj_idx in enumerate(obj_idxes_list)} 
         '''综合当前帧的跟踪结果'''
         outputs_i = {
@@ -223,7 +224,7 @@ class ClipMatcher(SetCriterion):
         ''' 
         建立跟踪结果和gt目标id的匹配关系
         注意track instance初始长度为300 (i.e., query), 
-        上一帧跟踪到的instance被append到了后面，成为了当前帧的track query
+        上一帧跟踪到的instance被append到了后面, 成为了当前帧的track query
         '''
         full_track_idxes = torch.arange(len(track_instances), dtype=torch.long).to(pred_logits_i.device)
         matched_track_idxes = (track_instances.obj_idxes >= 0)  # occu 
@@ -237,20 +238,22 @@ class ClipMatcher(SetCriterion):
         [305,   7],
         [306,   8],
         [307,   5]], device='cuda:0') 
-        前者是跟踪结果中匹配到的instance的index，后者是gt中的目标id
+        前者是跟踪结果中匹配到的instance的index, 后者是gt中的目标id
         '''
         prev_matched_indices = torch.stack(
             [full_track_idxes[matched_track_idxes], track_instances.matched_gt_idxes[matched_track_idxes]], dim=1).to(
             pred_logits_i.device)
         
-
+        '''
+        构建新的匹配, 可能是新出现的目标
+        '''
         # step2. select the unmatched slots.
         # note that the FP tracks whose obj_idxes are -2 will not be selected here.
-        ''' 找到未匹配的跟踪结果，上一帧存在而这一帧消失，可能是目标丢失 '''
+        '''找到未匹配的跟踪结果'''
         unmatched_track_idxes = full_track_idxes[track_instances.obj_idxes == -1]
 
         # step3. select the untracked gt instances (new tracks).
-        ''' 找到新的跟踪实例，上一帧不存在而这一帧出现，可能是新目标 '''
+        '''找到未匹配的gt'''
         tgt_indexes = track_instances.matched_gt_idxes
         tgt_indexes = tgt_indexes[tgt_indexes != -1]
 
@@ -261,7 +264,7 @@ class ClipMatcher(SetCriterion):
         untracked_gt_instances = gt_instances_i[untracked_tgt_indexes]
 
         def match_for_single_decoder_layer(unmatched_outputs, matcher):
-            ''' 默认采用HungarianMatcher '''
+            '''默认采用HungarianMatcher, 与prev_match不同, 这里主要利用框进行匹配而非特征'''
             new_track_indices = matcher(unmatched_outputs,
                                              [untracked_gt_instances])  # list[tuple(src_idx, tgt_idx)]
 
@@ -280,10 +283,12 @@ class ClipMatcher(SetCriterion):
         new_matched_indices = match_for_single_decoder_layer(unmatched_outputs, self.matcher)
 
         # step5. update obj_idxes according to the new matching result.
+        '''给新发现目标分配annotation中目标总id'''
         track_instances.obj_idxes[new_matched_indices[:, 0]] = gt_instances_i.obj_ids[new_matched_indices[:, 1]].long()
         track_instances.matched_gt_idxes[new_matched_indices[:, 0]] = new_matched_indices[:, 1]
 
         # step6. calculate iou.
+        '''为匹配上的目标计算iou'''
         active_idxes = (track_instances.obj_idxes >= 0) & (track_instances.matched_gt_idxes >= 0)
         active_track_boxes = track_instances.pred_boxes[active_idxes]
         if len(active_track_boxes) > 0:
@@ -293,9 +298,11 @@ class ClipMatcher(SetCriterion):
             track_instances.iou[active_idxes] = matched_boxlist_iou(Boxes(active_track_boxes), Boxes(gt_boxes))
 
         # step7. merge the unmatched pairs and the matched pairs.
+        '''合并新的匹配结果和过去的匹配结果'''
         matched_indices = torch.cat([new_matched_indices, prev_matched_indices], dim=0)
 
         # step8. calculate losses.
+        '''计算损失'''
         self.num_samples += len(gt_instances_i) + num_disappear_track
         self.sample_device = pred_logits_i.device
         for loss in self.losses:
@@ -525,6 +532,11 @@ class MOTR(nn.Module):
                 for a, b in zip(outputs_class[:-1], outputs_coord[:-1])]
 
     def _forward_single_image(self, samples, track_instances: Instances):
+        '''
+        单张图片推理
+        '''
+
+        '''获取feature以及mask, pos'''
         features, pos = self.backbone(samples)
         # src, mask = features[-1].decompose()
         # assert mask is not None
@@ -550,11 +562,21 @@ class MOTR(nn.Module):
                 srcs.append(src)
                 masks.append(mask)
                 pos.append(pos_l)
-
+        '''
+        根据上一帧的跟踪结果获取当前输出的hs特征
+        保留初始的(上一帧的)参考点(其实是偏移)归一化中心坐标init_reference
+        以及经过decoder学习的参考点(其实是偏移)归一化中心坐标inter_references
+        用query_pos作为query_embed, i.e., query (det_query + track_query)
+        用ref_pts作为参考点, 对应每一个query
+        这部分原理基本和Deformable DETR相同
+        '''
         hs, init_reference, inter_references, enc_outputs_class, enc_outputs_coord_unact = self.transformer(srcs, masks, pos, track_instances.query_pos, ref_pts=track_instances.ref_pts)
 
         outputs_classes = []
         outputs_coords = []
+        '''
+        随着decoder的输出层数加深, reference_points逐渐从上一帧目标的对应点(其实是偏移)变为当前帧目标的对应点(其实是偏移)
+        '''
         for lvl in range(hs.shape[0]):
             if lvl == 0:
                 reference = init_reference
@@ -575,6 +597,7 @@ class MOTR(nn.Module):
         outputs_coord = torch.stack(outputs_coords)
 
         ref_pts_all = torch.cat([init_reference[None], inter_references[:, :, :, :2]], dim=0)
+        ''' TODO: 最终选取了倒数第二层decoder的输出参考点(其实是偏移)作为输出, 为什么?'''
         out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1], 'ref_pts': ref_pts_all[5]}
         if self.aux_loss:
             out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord)
@@ -583,6 +606,10 @@ class MOTR(nn.Module):
     
     def _post_process_single_image(self, frame_res, track_instances, is_last):
         with torch.no_grad():
+            ''' 
+            在训练模式下, 关注模型对所有类别的预测结果, 因此需要计算每个类别的预测概率, 并取最大值作为跟踪分数
+            而在推理模式下, 通常只关心模型对最可能的类别的预测结果, 因此只需要计算第一个类别的预测概率
+            '''
             if self.training:
                 track_scores = frame_res['pred_logits'][0, :].sigmoid().max(dim=-1).values
             else:
@@ -646,13 +673,14 @@ class MOTR(nn.Module):
             'pred_logits': [],
             'pred_boxes': [],
         }
-
+        '''初始化track_instances'''
         track_instances = self._generate_empty_tracks()
         keys = list(track_instances._fields.keys())
         for frame_index, frame in enumerate(frames):
             frame.requires_grad = False
             is_last = frame_index == len(frames) - 1
             if self.use_checkpoint and frame_index < len(frames) - 2:
+                '''获得当前帧的跟踪结果, 并记录中间变量'''
                 def fn(frame, *args):
                     frame = nested_tensor_from_tensor_list([frame])
                     tmp = Instances((1, 1), **dict(zip(keys, args)))
@@ -680,8 +708,12 @@ class MOTR(nn.Module):
                     } for i in range(5)],
                 }
             else:
+                '''获得当前帧的跟踪结果, 但不记录中间变量'''
                 frame = nested_tensor_from_tensor_list([frame])
                 frame_res = self._forward_single_image(frame, track_instances)
+            '''
+            后处理
+            '''
             frame_res = self._post_process_single_image(frame_res, track_instances, is_last)
 
             track_instances = frame_res['track_instances']
