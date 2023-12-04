@@ -106,6 +106,7 @@ class QueryInteractionModule(QueryInteractionBase):
     def _add_fp_tracks(self, track_instances: Instances, active_track_instances: Instances) -> Instances:
             inactive_instances = track_instances[track_instances.obj_idxes < 0]
 
+            '''从active_instances中随机选择一定数量的tracks, 保证active track和fp track的比例一定'''
             # add fp for each active track in a specific probability.
             fp_prob = torch.ones_like(active_track_instances.scores) * self.fp_ratio
             selected_active_track_instances = active_track_instances[torch.bernoulli(fp_prob).bool()]
@@ -113,8 +114,10 @@ class QueryInteractionModule(QueryInteractionBase):
             if len(inactive_instances) > 0 and len(selected_active_track_instances) > 0:
                 num_fp = len(selected_active_track_instances)
                 if num_fp >= len(inactive_instances):
+                    '''如果inactivate数量较少, 则直接用所有的inactivate track作为fp track'''
                     fp_track_instances = inactive_instances
                 else:
+                    '''如果被选择的active track数量小于inactive track数量, 则选择IoU最大的inactive track作为fp track'''
                     inactive_boxes = Boxes(box_ops.box_cxcywh_to_xyxy(inactive_instances.pred_boxes))
                     selected_active_boxes = Boxes(box_ops.box_cxcywh_to_xyxy(selected_active_track_instances.pred_boxes))
                     ious = pairwise_iou(inactive_boxes, selected_active_boxes)
@@ -133,6 +136,7 @@ class QueryInteractionModule(QueryInteractionBase):
     def _select_active_tracks(self, data: dict) -> Instances:
         track_instances: Instances = data['track_instances']
         if self.training:
+            '''选择active样本并dropout(添加一定数量的false positive tracks)'''
             active_idxes = (track_instances.obj_idxes >= 0) & (track_instances.iou > 0.5)
             active_track_instances = track_instances[active_idxes]
             # set -2 instead of -1 to ensure that these tracks will not be selected in matching.
@@ -145,6 +149,9 @@ class QueryInteractionModule(QueryInteractionBase):
         return active_track_instances
 
     def _update_track_embedding(self, track_instances: Instances) -> Instances:
+        '''
+        利用output_embedding结合query_pos, 更新query_feat(和query_pos), 参考点
+        '''
         if len(track_instances) == 0:
             return track_instances
         dim = track_instances.query_pos.shape[1]

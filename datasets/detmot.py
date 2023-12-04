@@ -62,6 +62,7 @@ class DetMOTDetection:
             for i in range(len(self.sampler_steps) - 1):
                 assert self.sampler_steps[i] < self.sampler_steps[i + 1]
             ''' TODO 不太清楚这个item num有什么用哇，似乎只是一次采样后剩下的图片数量'''
+            ''' 为了防止采样frame超出video的长度，这里需要对item num进行调整'''
             self.item_num = len(self.img_files) - (self.lengths[-1] - 1) * self.sample_interval
             self.period_idx = 0
             ''' 每次采样的图片数量，开始时按照最短 '''
